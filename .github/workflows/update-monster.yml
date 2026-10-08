@@ -1,0 +1,83 @@
+name: Actualizar Monster
+on:
+  repository_dispatch:
+    types: [update_monster]
+permissions:
+  contents: write
+jobs:
+  recibir:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Recibir bloque y consolidar lote completo
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const p = context.payload.client_payload;
+            const valid = x => x && /^\d{6}$/.test(x.period) &&
+              /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(x.batchId) &&
+              Number.isInteger(x.index) && Number.isInteger(x.total) &&
+              x.index >= 0 && x.total > 0 && x.total <= 200 && x.index < x.total &&
+              Array.isArray(x.rows) && x.rows.length > 0 && x.rows.length <= 100 &&
+              x.rows.every(r => Array.isArray(r) && r.length === 25 &&
+                /^\d+$/.test(String(r[7])));
+            if (!valid(p)) throw new Error('Bloque Monster inválido');
+            const repo = context.repo;
+            const folder = 'incoming/' + p.batchId.replace(/[:.]/g, '-');
+            const pathFor = i => folder + '/' + String(i).padStart(3, '0') + '.json';
+            const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+            async function read(path) {
+              try {
+                const {data} = await github.rest.repos.getContent({...repo, path, ref:'main'});
+                if (Array.isArray(data) || data.type !== 'file') throw new Error('Archivo inválido');
+                const text = Buffer.from(data.content, 'base64').toString('utf8');
+                return {sha:data.sha, value:JSON.parse(text)};
+              } catch (e) {
+                if (e.status === 404) return null;
+                throw e;
+              }
+            }
+            async function write(path, value, shouldSkip) {
+              for (let attempt = 0; attempt < 20; attempt++) {
+                const old = await read(path);
+                if (shouldSkip(old?.value)) return;
+                try {
+                  await github.rest.repos.createOrUpdateFileContents({
+                    ...repo, path, branch:'main', sha:old?.sha,
+                    message:'Actualizar datos Monster',
+                    content:Buffer.from(JSON.stringify(value)).toString('base64')
+                  });
+                  return;
+                } catch(e) {
+                  if (![409,422].includes(e.status) || attempt === 19) throw e;
+                  await pause(1000 + Math.floor(Math.random() * 3000));
+                }
+              }
+            }
+            await write(pathFor(p.index), p, old => {
+              if (!old) return false;
+              if (JSON.stringify(old) !== JSON.stringify(p)) throw new Error('Bloque duplicado con datos diferentes');
+              return true;
+            });
+            const blocks = [];
+            for (let i = 0; i < p.total; i++) {
+              const block = await read(pathFor(i));
+              if (!block) {
+                core.info('Bloque guardado. Esperando completar el lote.');
+                return;
+              }
+              const b = block.value;
+              if (!valid(b) || b.index !== i || b.total !== p.total ||
+                  b.period !== p.period || b.batchId !== p.batchId) {
+                throw new Error('Lote inconsistente');
+              }
+              blocks.push(b);
+            }
+            const rows = blocks.flatMap(b => b.rows);
+            const codes = rows.map(r => String(r[7]));
+            if (new Set(codes).size !== codes.length) throw new Error('Clientes duplicados en el lote');
+            const snapshot = {period:p.period, batchId:p.batchId, updatedAt:p.batchId, rows};
+            await write('data.json', snapshot, old =>
+              old && (old.period > p.period ||
+              (old.period === p.period && old.batchId >= p.batchId)));
+            core.info('Lote completo validado: ' + rows.length + ' clientes.');
