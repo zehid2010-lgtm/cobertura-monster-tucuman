@@ -22,5 +22,28 @@ const xml=s=>new DOMParser().parseFromString(s,'application/xml');
 async function loadXlsx(file){if(file.size>30*1024*1024)throw Error('La planilla supera 30 MB');let files=await unzip(await file.arrayBuffer()),book=xml(files['xl/workbook.xml']),sheet=[...book.getElementsByTagName('sheet')].find(s=>s.getAttribute('name')==='CLIENTE');if(!sheet)throw Error('Falta la hoja CLIENTE');let rel=xml(files['xl/_rels/workbook.xml.rels']),link=[...rel.getElementsByTagName('Relationship')].find(x=>x.getAttribute('Id')===sheet.getAttribute('r:id')),path=link.getAttribute('Target').replace(/^\//,'');if(!path.startsWith('xl/'))path='xl/'+path;let strings=files['xl/sharedStrings.xml']?[...xml(files['xl/sharedStrings.xml']).getElementsByTagName('si')].map(s=>[...s.getElementsByTagName('t')].map(t=>t.textContent).join('')):[];let raw=[...xml(files[path]).getElementsByTagName('row')].map(r=>{let a=[];for(let c of r.getElementsByTagName('c')){let col=c.getAttribute('r').match(/^[A-Z]+/)[0],i=0;for(let l of col)i=i*26+l.charCodeAt(0)-64;let value=c.getElementsByTagName('v')[0]?.textContent??'';a[i-1]=c.getAttribute('t')==='s'?strings[Number(value)]:c.getAttribute('t')==='inlineStr'?[...c.getElementsByTagName('t')].map(t=>t.textContent).join(''):value===''?null:Number.isFinite(Number(value))?Number(value):value}return a});
  let h=raw.findIndex(r=>r[1]==='Territorio'&&r[4]==='Ruta Preventa');if(h<0||raw[h][17]!=='GREEN'||raw[h][18]!=='GREENZ'||raw[h][21]!=='MLOCO'||raw[h][11]!=='ULTRA')throw Error('Los encabezados no coinciden con el informe Monster esperado');let next=raw.slice(h+1).filter(r=>r[1]==='Tucumán');if(!next.some(r=>bosses.base.includes(r[2])))throw Error('No se encontraron datos de tu jefatura en Tucumán');let period=raw.find(r=>r[1]==='COBERTURAS')?.[2];rows=next;$('period').textContent=period?String(period).slice(4,6)+' / '+String(period).slice(0,4):'Informe actualizado';limit=100;refreshBoss();$('message').textContent='Planilla actualizada: '+file.name+'. Se recalcularon los compradores KO y las coberturas. Esta actualización se mantiene durante esta sesión.'}
  $('team').onchange=refreshBoss;$('boss').onchange=refreshRoutes;$('route').onchange=()=>{limit=100;render()};$('search').oninput=$('status').onchange=()=>{limit=100;render()};$('more').onclick=()=>{limit+=100;render()};$('file').onchange=async e=>{const f=e.target.files[0];if(!f)return;$('message').textContent='Revisando planilla…';try{await loadXlsx(f)}catch(err){$('message').textContent='No se pudo actualizar: '+err.message+'. Se conservan los datos anteriores.'}e.target.value=''};
- fetch('data.json?v='+Date.now(),{cache:'no-store'}).then(r=>{if(!r.ok)throw Error('HTTP '+r.status);return r.json()}).then(d=>{if(!Array.isArray(d.rows))throw Error('Informe inválido');rows=d.rows;refreshBoss();const fecha=d.updatedAt?new Date(d.updatedAt).toLocaleString('es-AR',{timeZone:'America/Argentina/Tucuman'}):'sin fecha';$('message').textContent='Última actualización: '+fecha+' · '+rows.length.toLocaleString('es-AR')+' clientes.'}).catch(e=>$('message').textContent='No se pudo cargar el informe actualizado: '+e.message+'. Actualizá la página.');
+let lastBatch='',fetching=false,manualUpload=false;
+async function refreshData(){
+ if(fetching||manualUpload)return;
+ fetching=true;
+ try{
+  const response=await fetch('data.json?v='+Date.now(),{cache:'no-store',headers:{'Cache-Control':'no-cache'}});
+  if(!response.ok)throw Error('HTTP '+response.status);
+  const d=await response.json();
+  if(!Array.isArray(d.rows)||!d.rows.length)throw Error('Informe vacío o inválido');
+  const batch=String(d.batchId||d.updatedAt||'');
+  if(batch!==lastBatch||!rows.length){
+   rows=d.rows;lastBatch=batch;const currentBoss=$('boss').value,currentRoute=$('route').value;
+   refreshBoss();
+   if(bosses[$('team').value].includes(currentBoss)){$('boss').value=currentBoss;refreshRoutes();$('route').value=[...$('route').options].some(o=>o.value===currentRoute)?currentRoute:'';render()}
+  }
+  const fecha=d.updatedAt?new Date(d.updatedAt).toLocaleString('es-AR',{timeZone:'America/Argentina/Tucuman'}):'sin fecha';
+  $('message').textContent='Última actualización: '+fecha+' · '+rows.length.toLocaleString('es-AR')+' clientes · Verificación automática activa.';
+ }catch(e){$('message').textContent='No se pudo verificar la actualización: '+e.message+'. Se mantienen los últimos datos cargados.'}
+ finally{fetching=false}
+}
+refreshData();
+setInterval(refreshData,5*60*1000);
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)refreshData()});
+window.addEventListener('focus',refreshData);
  if(document.modelContext?.registerTool)Promise.resolve(document.modelContext.registerTool({name:'consultar_cobertura_monster',description:'Consulta cobertura de la selección visible por equipo, jefe y ruta.',inputSchema:{type:'object',properties:{},additionalProperties:false},annotations:{readOnlyHint:true},execute:input=>{if(!input||Object.keys(input).length)throw Error('Se espera un objeto vacío');return {equipo:$('team').value,jefatura:$('boss').value,ruta:$('route').value,objetivo:target(),...stats(selected())}}})).catch(()=>{});
